@@ -1,0 +1,89 @@
+﻿name: ForgeFlow AI — Phase 4 CI Verification
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+jobs:
+  phase4_integration_debug:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: forgeflow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Install backend + test dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r backend/requirements.txt
+        pip install pytest>=8.0.0 pytest-asyncio>=0.23.5 psycopg2-binary>=2.9.9 faker>=24.0.0
+    - name: Apply database migrations (fail-fast)
+      env:
+        PGPASSWORD: password
+      run: |
+        psql -h localhost -p 5432 -U postgres -d forgeflow_test -v ON_ERROR_STOP=1 <<'SQL'
+        CREATE SCHEMA IF NOT EXISTS auth;
+        CREATE TABLE IF NOT EXISTS auth.users (id UUID PRIMARY KEY);
+        CREATE OR REPLACE FUNCTION auth.uid() RETURNS UUID AS \$\$
+        BEGIN
+          RETURN current_setting('request.jwt.claim.sub', true)::UUID;
+        EXCEPTION WHEN OTHERS THEN
+          RETURN NULL;
+        END;
+        \$\$ LANGUAGE plpgsql;
+        DO \$\$ BEGIN
+          CREATE ROLE authenticated;
+        EXCEPTION WHEN duplicate_object THEN NULL;
+        END \$\$;
+        GRANT USAGE ON SCHEMA public TO authenticated;
+        SQL
+        psql -h localhost -p 5432 -U postgres -d forgeflow_test -v ON_ERROR_STOP=1 -f supabase/migrations/20260902000000_core_foundation.sql
+        psql -h localhost -p 5432 -U postgres -d forgeflow_test -v ON_ERROR_STOP=1 -f supabase/migrations/20260902000001_job_leases.sql
+        psql -h localhost -p 5432 -U postgres -d forgeflow_test -v ON_ERROR_STOP=1 -f supabase/migrations/20260902000002_phase4_generation.sql
+        psql -h localhost -p 5432 -U postgres -d forgeflow_test -v ON_ERROR_STOP=1 -f supabase/migrations/20260903000003_phase4_idempotency.sql
+        psql -h localhost -p 5432 -U postgres -d forgeflow_test -v ON_ERROR_STOP=1 <<'SQL'
+        GRANT USAGE ON SCHEMA public TO authenticated;
+        GRANT ALL ON ALL TABLES IN SCHEMA public TO authenticated;
+        GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO authenticated;
+        SQL
+    - name: Run mandatory integration tests (REQUIRE_INTEGRATION_TESTS=1)
+      env:
+        DATABASE_URL: "postgresql://postgres:password@localhost:5432/forgeflow_test"
+        REDIS_URL: "redis://localhost:6379/0"
+        REQUIRE_INTEGRATION_TESTS: "1"
+        SUPABASE_URL: "http://localhost:8000"
+        SUPABASE_KEY: "dummy"
+        SUPABASE_JWT_SECRET: "dummy"
+        PYTHONPATH: backend
+      run: |
+        REQUIRE_INTEGRATION_TESTS=1 python -m pytest backend/tests -ra --tb=long > pytest_output.txt 2>&1
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: pytest-logs
+        path: pytest_output.txt
