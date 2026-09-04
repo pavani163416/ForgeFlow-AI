@@ -55,10 +55,13 @@ import uuid
 def test_generation_idempotency_concurrency(db_connection):
     cursor = db_connection.cursor()
     org_id = str(uuid.uuid4())
+    project_id = str(uuid.uuid4())
     migration_id = str(uuid.uuid4())
     cursor.execute("INSERT INTO organizations (id, name) VALUES (%s, 'Test Org Idempotency')", (org_id,))
-    cursor.execute("INSERT INTO migration_jobs (id, organization_id, status) VALUES (%s, %s, 'GENERATING')", (migration_id, org_id))
+    cursor.execute("INSERT INTO projects (id, organization_id, name, framework) VALUES (%s, %s, 'Test Project', 'react')", (project_id, org_id))
+    cursor.execute("INSERT INTO migration_jobs (id, project_id, organization_id, status) VALUES (%s, %s, %s, 'GENERATING')", (migration_id, project_id, org_id))
     db_connection.commit()
+
 
     repo = GenerationRepository(os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/forgeflow_test"))
 
