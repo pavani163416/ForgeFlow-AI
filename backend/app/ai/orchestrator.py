@@ -1,7 +1,7 @@
 import uuid
 import asyncio
 from typing import Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from .interfaces import AIProvider
 from app.security.redaction import SecretRedactor
 
