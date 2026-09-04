@@ -1,0 +1,137 @@
+name: ForgeFlow AI CI Security Checks
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  lint_and_type_check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8 mypy
+        pip install -r backend/requirements.txt
+    - name: Lint with flake8
+      run: |
+        flake8 backend/app --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 backend/app --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+    - name: Type check with mypy
+      run: |
+        mypy backend/app
+
+  security_scanning:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - name: Secret Scanning (TruffleHog)
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: ""
+        head: ${{ github.ref_name }}
+        extra_args: --debug --only-verified
+    - name: Set up Python for dependency scanning
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    - name: Dependency Scanning (pip-audit)
+      run: |
+        python -m pip install pip-audit
+        pip-audit -r backend/requirements.txt
+
+  backend_tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: forgeflow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest pytest-asyncio psycopg2-binary
+        pip install -r backend/requirements.txt
+    - name: Apply Database Migrations
+      env:
+        DATABASE_URL: "postgresql://postgres:password@localhost:5432/forgeflow_test"
+      run: |
+        sudo apt-get update && sudo apt-get install -y postgresql-client
+        for file in $(ls supabase/migrations/*.sql | sort); do
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$file"
+        done
+    - name: Run Mandatory Integration Tests
+      env:
+        DATABASE_URL: "postgresql://postgres:password@localhost:5432/forgeflow_test"
+        REDIS_URL: "redis://localhost:6379/0"
+        REQUIRE_INTEGRATION_TESTS: "1"
+        SUPABASE_URL: "http://localhost:8000"
+        SUPABASE_KEY: "dummy"
+        SUPABASE_JWT_SECRET: "dummy"
+      run: |
+        REQUIRE_INTEGRATION_TESTS=1 python -m pytest backend/tests -ra
+
+    - name: Install gVisor (runsc)
+      continue-on-error: true
+      run: |
+        set -e
+        URL="https://storage.googleapis.com/gvisor/releases/release/latest/x86_64"
+        wget ${URL}/runsc ${URL}/runsc.sha512
+        sha512sum -c runsc.sha512
+        rm -f runsc.sha512
+        chmod a+rx runsc
+        sudo mv runsc /usr/local/bin
+        /usr/local/bin/runsc install
+        sudo systemctl reload docker
+        docker run --rm --runtime=runsc alpine echo "gVisor works"
+
+    - name: Set up Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.41.9'
+
+    - name: Verify Generated Artifact
+      env:
+        PYTHONPATH: backend
+        SUPABASE_URL: "http://localhost:8000"
+        SUPABASE_KEY: "dummy"
+        SUPABASE_JWT_SECRET: "dummy"
+      run: |
+        python backend/run_e2e_real.py
+        unzip test_archives/flutter-source-test_run_123.zip -d flutter_project
+        cd flutter_project
+        flutter analyze
+        flutter test
+        flutter build apk
